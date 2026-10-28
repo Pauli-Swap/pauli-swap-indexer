@@ -49,3 +49,7 @@ npm run reindex      # drop the schema; stop the indexer first (docs/INDEXER.md 
 `scripts/ui-compare.mjs` and `scripts/ui-timing.mjs` diff and time interface
 builds with and without the indexer; they use Playwright from
 `../pauli-swap-interface` (`INTERFACE_DIR`).
+
+## License
+
+GNU General Public License v2.0 or later; see [LICENSE](LICENSE).

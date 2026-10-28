@@ -28,5 +28,11 @@ const predict = read(`${network}.json`);
 const faucet = read(`faucet-${network}.json`);
 fs.writeFileSync(path.join(out, `predict-${network}.json`), JSON.stringify(record(predict), null, 2) + '\n');
 fs.writeFileSync(path.join(out, `faucet-${network}.json`), JSON.stringify(record(faucet), null, 2) + '\n');
-fs.copyFileSync(path.join(repo, 'quests', 'catalog.json'), path.join(out, 'quests.json'));
-console.log(`synced Predict ABIs, predict ${predict ? `startBlock ${predict.startBlock}` : 'not deployed'}, faucet ${faucet ? `startBlock ${faucet.startBlock}` : 'not deployed'}, quest catalogue`);
+// The public catalogue plus the hidden quests, which are not in any public
+// repo: quests/hidden.json is installed from the private ops repo.
+const catalogue = JSON.parse(fs.readFileSync(path.join(repo, 'quests', 'catalog.json'), 'utf8'));
+const hiddenFile = path.join(repo, 'quests', 'hidden.json');
+const hidden = fs.existsSync(hiddenFile) ? JSON.parse(fs.readFileSync(hiddenFile, 'utf8')).quests : [];
+catalogue.quests.push(...hidden.map((q) => ({ ...q, hidden: true })));
+fs.writeFileSync(path.join(out, 'quests.json'), JSON.stringify(catalogue, null, 2) + '\n');
+console.log(`synced Predict ABIs, predict ${predict ? `startBlock ${predict.startBlock}` : 'not deployed'}, faucet ${faucet ? `startBlock ${faucet.startBlock}` : 'not deployed'}, quest catalogue (${hidden.length} hidden)`);

@@ -311,7 +311,8 @@ and WQRL `Deposit` / `Withdrawal` (a direct wrap names the wallet as
 `dst` / `src`).
 
 Quest rules live in `src/quests.ts`, driven by the catalogue
-`pauli-swap-prediction-market/quests/catalog.json`:
+`pauli-swap-prediction-market/quests/catalog.json`, plus its gitignored
+`quests/hidden.json` (installed from the private ops repo) when present:
 
 - a wallet is the transaction signer for swaps and liquidity, the event user
   for Predict, `to` for drips;
