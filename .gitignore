@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+predict-devnet.json
+faucet-devnet.json
+quests.json
+sybil-season-*.json
+.env.*
+!.env.example
+src/private/

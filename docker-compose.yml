@@ -1,0 +1,80 @@
+# PauliSwap indexer + Postgres. Settings come from .env (see .env.example).
+#
+# RPC_URL on the VPS: a container on the default bridge network cannot reach a
+# gqrl that listens on 127.0.0.1 only. Either make gqrl listen on the docker
+# bridge address (RPC_URL=http://host.docker.internal:8545, mapped below), or
+# run the indexer with `network_mode: host` (Linux only) and RPC_URL=http://127.0.0.1:8545.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: acorn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-acorn}
+      POSTGRES_DB: acorn
+    # Single node on a small disk, no replicas (docs/INDEXER.md §14).
+    command: >
+      postgres
+      -c wal_level=minimal
+      -c max_wal_senders=0
+      -c archive_mode=off
+      -c max_wal_size=256MB
+      -c min_wal_size=64MB
+      -c wal_compression=on
+      -c default_toast_compression=lz4
+      -c shared_buffers=128MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acorn -d acorn"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  indexer:
+    build: .
+    image: pauli-swap-indexer:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://acorn:${POSTGRES_PASSWORD:-acorn}@postgres:5432/acorn
+      RPC_URL: ${RPC_URL:-http://host.docker.internal:8545}
+      CONFIRMATIONS: ${CONFIRMATIONS:-3}
+      LOG_RANGE: ${LOG_RANGE:-20000}
+      POLL_MS: ${POLL_MS:-4000}
+      MIN_QRL_LIQUIDITY: ${MIN_QRL_LIQUIDITY:-1}
+      HOUR_DATA_DAYS: ${HOUR_DATA_DAYS:-90}
+      EVENT_DAYS: ${EVENT_DAYS:-0}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      # USD pricing (docs/INDEXER.md §9); none on the devnet.
+      USD_SOURCE: ${USD_SOURCE:-none}
+      USD_FEED: ${USD_FEED:-}
+      USD_FEED_MINUTES: ${USD_FEED_MINUTES:-5}
+      USD_FEED_MAX_AGE_HOURS: ${USD_FEED_MAX_AGE_HOURS:-6}
+      USD_MAX_DEVIATION: ${USD_MAX_DEVIATION:-0.05}
+      STABLE_TOKENS: ${STABLE_TOKENS:-}
+      MIN_USD_LIQUIDITY: ${MIN_USD_LIQUIDITY:-10000}
+      BRIDGE_TOKENS: ${BRIDGE_TOKENS:-}
+      # The Postgres volume, mounted read only, so the disk guard sees its free space.
+      DISK_PATH: /pgdata
+      DISK_MIN_FREE_GB: ${DISK_MIN_FREE_GB:-5}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - pgdata:/pgdata:ro
+    ports:
+      - ${API_BIND:-127.0.0.1}:${API_PORT:-4000}:4000
+    logging: *logging
+
+volumes:
+  pgdata:
