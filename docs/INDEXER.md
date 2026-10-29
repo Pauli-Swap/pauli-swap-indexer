@@ -528,7 +528,9 @@ All four paths are tested (§15).
 `POST /graphql` (or `GET /graphql?query=…`), read only, plus `GET /health`.
 The API is flat: fields return addresses as strings, not nested entities, so
 no query fans out into per-row lookups. `first` is capped at 1000; page with
-`skip`. Big integers are strings.
+`skip`. Big integers are strings. So a request costs its root fields: at most
+10 per request, aliases and fragments included, and at most one of
+`questQueue`, `questProgress`, `predictLeaderboard`. Bodies are capped at 64 KiB.
 
 | Query | Returns |
 | --- | --- |

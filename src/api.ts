@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { buildSchema, graphql, GraphQLError } from 'graphql';
+import { buildSchema, graphql, GraphQLError, Kind, parse, type DocumentNode, type SelectionSetNode } from 'graphql';
 import pg from 'pg';
 import { checksum, hex, render, toBytes } from './address.js';
 import { config } from './config.js';
@@ -661,6 +661,46 @@ function resolvers(db: pg.Pool, indexer: Indexer, usd: Usd, predict: PredictInde
 }
 
 const MAX_BODY = 64 * 1024;
+/// Every list and every quest or season computation is a root field (no type
+/// below Query resolves another list), so a request's cost is its root
+/// fields, aliases included. 64 KiB holds thousands of aliases of
+/// questQueue, each a full pass over the season's wallets.
+const MAX_ROOT_FIELDS = 10;
+const HEAVY = new Set(['questQueue', 'questProgress', 'predictLeaderboard']);
+const MAX_HEAVY = 1;
+
+/// Root field names of every operation in `doc`, fragments expanded.
+export function rootFields(doc: DocumentNode): string[] {
+  const fragments = new Map(doc.definitions.flatMap((d) => (d.kind === Kind.FRAGMENT_DEFINITION ? [[d.name.value, d.selectionSet] as const] : [])));
+  const out: string[] = [];
+  const walk = (set: SelectionSetNode, seen: Set<string>) => {
+    for (const sel of set.selections) {
+      if (sel.kind === Kind.FIELD) out.push(sel.name.value);
+      else if (sel.kind === Kind.INLINE_FRAGMENT) walk(sel.selectionSet, seen);
+      else {
+        const name = sel.name.value;
+        const frag = fragments.get(name);
+        if (frag && !seen.has(name)) walk(frag, new Set([...seen, name]));
+      }
+    }
+  };
+  for (const d of doc.definitions) if (d.kind === Kind.OPERATION_DEFINITION) walk(d.selectionSet, new Set());
+  return out;
+}
+
+/// Why `query` is refused, or null.
+export function tooCostly(query: string): string | null {
+  let doc: DocumentNode;
+  try {
+    doc = parse(query);
+  } catch {
+    return null; // graphql() reports the syntax error itself
+  }
+  const fields = rootFields(doc).filter((f) => f !== '__typename');
+  if (fields.length > MAX_ROOT_FIELDS) return `at most ${MAX_ROOT_FIELDS} root fields per request`;
+  if (fields.filter((f) => HEAVY.has(f)).length > MAX_HEAVY) return `at most ${MAX_HEAVY} of ${[...HEAVY].join(', ')} per request`;
+  return null;
+}
 
 export function startApi(db: pg.Pool, indexer: Indexer, usd: Usd, predict: PredictIndexer) {
   const root = resolvers(db, indexer, usd, predict);
@@ -716,6 +756,8 @@ export function startApi(db: pg.Pool, indexer: Indexer, usd: Usd, predict: Predi
         variables = body.variables;
       } else return send(res, 405, { error: 'method not allowed' });
       if (!query) return send(res, 400, { errors: [{ message: 'missing query' }] });
+      const refused = tooCostly(query);
+      if (refused) return send(res, 400, { errors: [{ message: refused }] });
 
       const result = await graphql({ schema, source: query, rootValue: root, variableValues: variables });
       send(res, 200, result);
