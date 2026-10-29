@@ -50,8 +50,24 @@ export type Progress = {
 type Season = { id: number; startedTs: number; endsAt: number };
 type Window = { from: number; to: number };
 
+/// The text of `q`, or nulls for a hidden quest the wallet has not been
+/// credited for, so the API never reveals one early.
+export function questText(q: Quest, credited: boolean) {
+  const masked = !!q.hidden && !credited;
+  return {
+    title: masked ? null : q.title,
+    detail: masked ? null : q.detail,
+    xp: masked ? null : q.xp,
+    action: masked ? null : (q.action ?? null),
+    target: masked ? null : q.target,
+  };
+}
+
 export class Quests {
-  constructor(private readonly db: pg.Pool) {}
+  constructor(
+    private readonly db: pg.Pool,
+    private readonly quests: Quest[] = QUESTS,
+  ) {}
 
   /// The latest season, or null before the first SeasonStarted.
   async season(): Promise<Season | null> {
@@ -131,7 +147,7 @@ export class Quests {
     const today = Math.floor(now / DAY);
     const { rows } = await this.db.query(`SELECT quest_id, day, ts FROM predict_quests WHERE wallet = $1`, [wallet]);
     const out: Progress[] = [];
-    for (const q of QUESTS) {
+    for (const q of this.quests) {
       const credited =
         q.kind === 'daily'
           ? rows.some((r) => r.quest_id === q.id && r.day === day)
@@ -143,17 +159,13 @@ export class Quests {
           ? { from: Math.max(day * DAY, season.startedTs), to: Math.min((day + 1) * DAY, season.endsAt) }
           : { from: season.startedTs, to: Math.min(season.endsAt, now + 1) };
       const value = w && w.from < w.to ? await this.measure(q, wallet, w, today) : 0;
-      const masked = !!q.hidden && !credited;
+      const text = questText(q, credited);
       out.push({
         id: q.id,
         kind: q.kind,
         hidden: !!q.hidden,
-        title: masked ? null : q.title,
-        detail: masked ? null : q.detail,
-        xp: masked ? null : q.xp,
-        action: masked ? null : (q.action ?? null),
-        target: masked ? null : q.target,
-        progress: masked ? null : Math.min(value, q.target),
+        ...text,
+        progress: text.target === null ? null : Math.min(value, q.target),
         met: value >= q.target,
         credited,
       });
@@ -190,7 +202,7 @@ export class Quests {
       for (const p of await this.progress(user, day, now)) {
         if (p.id === 0 || !p.met || p.credited) continue;
         if (p.kind === 'season' && day !== today) continue;
-        out.push({ user, questId: p.id, day, xp: QUESTS.find((q) => q.id === p.id)!.xp, kind: p.kind });
+        out.push({ user, questId: p.id, day, xp: this.quests.find((q) => q.id === p.id)!.xp, kind: p.kind });
       }
     }
     return out;

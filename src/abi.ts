@@ -125,7 +125,10 @@ const SEL = {
   NAME: selector('NAME()'),
 };
 
-const ethCall = (to: string, data: string, block: string = 'latest') => ({ method: 'qrl_call', params: [{ to: 'Q' + hex(to), data }, block] });
+const ethCall = (to: string, data: string, block: string = 'latest', from?: string) => ({
+  method: 'qrl_call',
+  params: [{ ...(from ? { from: 'Q' + hex(from) } : {}), to: 'Q' + hex(to), data }, block],
+});
 
 function decodeOr<T>(type: string, value: unknown): T | null {
   if (value instanceof RpcError || typeof value !== 'string' || value === '0x') return null;
@@ -155,12 +158,17 @@ export async function tokenMetadata(rpc: Rpc, addresses: string[]): Promise<Toke
 }
 
 /// View calls by signature at `block` (recent blocks only on a pruned node),
-/// decoded with `returns`; used by the audit.
-export async function viewCalls(rpc: Rpc, block: number, calls: { to: string; signature: string; args?: { type: string; value: unknown }[]; returns: string[] }[]) {
+/// decoded with `returns`; used by the audit. `from` simulates a write as
+/// that wallet (the audit's claim(id) check).
+export async function viewCalls(
+  rpc: Rpc,
+  block: number,
+  calls: { to: string; signature: string; args?: { type: string; value: unknown }[]; returns: string[]; from?: string }[],
+) {
   const payload = calls.map((c) => {
     const args = c.args ?? [];
     const data = selector(c.signature) + (args.length ? codec.encodeParameters(args.map((a) => a.type), args.map((a) => a.value) as any).slice(2) : '');
-    return ethCall(c.to, data, hexNum(block));
+    return ethCall(c.to, data, hexNum(block), c.from);
   });
   const r = await rpc.batch<string>(payload);
   return r.map((v, i) => {

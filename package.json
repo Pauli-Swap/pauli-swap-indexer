@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "test": "tsx --test tests/*.test.ts",
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
     "migrate": "tsx src/cli.ts migrate",
@@ -18,7 +19,8 @@
     "sync:contracts": "node scripts/sync-contracts.mjs ../pauli-swap",
     "sync:lib": "node scripts/sync-lib.mjs ../pauli-swap-interface",
     "sync:predict": "node scripts/sync-predict.mjs ../pauli-swap-prediction-market",
-    "predict:sybil": "tsx src/cli.ts sybil"
+    "predict:sybil": "tsx src/cli.ts sybil",
+    "predict:snapshot": "tsx src/cli.ts snapshot"
   },
   "dependencies": {
     "@theqrl/web3": "1.0.3",

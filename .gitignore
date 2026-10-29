@@ -5,6 +5,7 @@ predict-devnet.json
 faucet-devnet.json
 quests.json
 sybil-season-*.json
+snapshot-season-*.json
 .env.*
 !.env.example
 src/private/

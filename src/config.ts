@@ -52,6 +52,10 @@ export const config = {
   minUsdLiquidity: num('MIN_USD_LIQUIDITY', 10_000),
   /// Tokens besides WQRL and STABLE_TOKENS that may carry a price to others.
   bridgeTokens: addresses('BRIDGE_TOKENS'),
+
+  // Season eligibility (§8.8), shared by predictLeaderboard and the snapshot.
+  predictMinDays: num('PREDICT_MIN_DAYS', 7),
+  predictMinMarkets: num('PREDICT_MIN_MARKETS', 3),
 };
 
 if (config.usdSource === 'stable' && !config.stableTokens.length) throw new Error('USD_SOURCE=stable needs STABLE_TOKENS');

@@ -35,7 +35,19 @@ RPC_URL=<same node> npm run audit
 ```
 
 compares every pool, token, holder balance and a sample of transaction senders
-with the chain at the indexer's block (docs/INDEXER.md §15).
+with the chain at the indexer's block (docs/INDEXER.md §15). `-- --predict`
+adds XP balances, positions and claimable amounts against PauliPredictXP and
+PredictMarket.
+
+## Season end
+
+```
+npm run predict:snapshot -- --block <snapshotBlock>
+```
+
+ranks the season at that block and writes the `closeSeason` arguments, with
+every wallet's score and eligibility (docs/INDEXER.md §8.8). It exits 2 on a
+warning (open markets, a block before the season ends, …) unless `--force`.
 
 ## Develop
 
@@ -43,6 +55,7 @@ with the chain at the indexer's block (docs/INDEXER.md §15).
 npm install
 npm run dev          # needs DATABASE_URL and RPC_URL
 npm run typecheck
+npm test             # TEST_DATABASE_URL for the database tests
 npm run reindex      # drop the schema; stop the indexer first (docs/INDEXER.md §13)
 ```
 

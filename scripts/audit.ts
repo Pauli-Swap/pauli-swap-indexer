@@ -1,9 +1,10 @@
 // Audits the indexer's API against the chain at the same block (the indexer's
 // _meta.block; a pruned node still serves state that recent). Exit code 1 on
-// any mismatch. Usage: npm run audit  (INDEXER_URL, RPC_URL from env)
+// any mismatch. Usage: npm run audit [-- --predict]  (INDEXER_URL, RPC_URL
+// from env). --predict adds the Predict checks (docs/INDEXER.md §15, 7).
 import { decode, getLogs, topicsFor, viewCalls } from '../src/abi.js';
 import { hex } from '../src/address.js';
-import { config, deployment } from '../src/config.js';
+import { config, deployment, predictDeployment } from '../src/config.js';
 import { Rpc, RpcError } from '../src/rpc.js';
 
 const INDEXER_URL = process.env.INDEXER_URL || 'http://127.0.0.1:4000/graphql';
@@ -37,7 +38,7 @@ function check(name: string, ok: boolean, detail = '') {
 }
 const short = (a: string) => a.slice(0, 9) + '…';
 
-const meta = (await gql(`{ _meta { block head hasIndexingErrors lastError chainId qrlPriceUSD } }`))._meta;
+const meta = (await gql(`{ _meta { block head hasIndexingErrors lastError chainId qrlPriceUSD predictBlock } }`))._meta;
 const B: number = meta.block;
 console.log(`indexer block ${B}, head ${meta.head}, chain ${meta.chainId}, errors: ${meta.lastError ?? 'none'}`);
 check('chain id', Number(await rpc.call('qrl_chainId')) === meta.chainId);
@@ -147,6 +148,71 @@ const protocol = (await gql(`{ protocol { tvlQRL trackedPoolCount } }`)).protoco
 const trackedPools = pools.filter((p) => p.tracked);
 check('protocol tvlQRL', near(protocol.tvlQRL, trackedPools.reduce((s, p) => s + (p.tvlQRL ?? 0), 0)));
 check('protocol trackedPoolCount', protocol.trackedPoolCount === trackedPools.length);
+
+// 7. Predict (--predict), at the Predict cursor: the views are explicit
+//    getters, so OC-V3-02 does not apply.
+if (process.argv.includes('--predict')) await auditPredict(meta.predictBlock);
+
+async function auditPredict(P: number) {
+  const XP = predictDeployment.contracts.PauliPredictXP;
+  const PM = predictDeployment.contracts.PredictMarket;
+  if (!XP || !PM) return check('predict deployed', false, 'predict-devnet.json has no contracts');
+  const season = (await gql(`{ predictSeason { id } }`)).predictSeason;
+  if (!season) return check('predict season indexed', false);
+  const pages = async <T>(field: string, query: string, variables: Record<string, unknown> = {}) => {
+    const out: T[] = [];
+    for (let skip = 0; ; skip += 1000) {
+      const page = (await gql(query, { ...variables, skip }))[field] as T[];
+      out.push(...page);
+      if (page.length < 1000) return out;
+    }
+  };
+  const markets = await pages<any>('predictMarkets', `query($skip: Int) { predictMarkets(first: 1000, skip: $skip) { id status outcome poolYes poolNo createdBlock settledBlock } }`);
+  const positions = await pages<any>('predictPositions', `query($skip: Int, $b: Int) { predictPositions(block: $b, includeEmpty: true, first: 1000, skip: $skip) { market user yesShares noShares claimable } }`, { b: P });
+  const board: any[] = [];
+  for (let skip = 0; ; skip += 1000) {
+    const b = (await gql(`query($s: Int, $b: Int, $skip: Int) { predictLeaderboard(season: $s, block: $b, first: 1000, skip: $skip) { standings { user xp claimable score } } }`, { s: season.id, b: P, skip })).predictLeaderboard;
+    board.push(...b.standings);
+    if (b.standings.length < 1000) break;
+  }
+  console.log(`predict block ${P}, season ${season.id}, ${markets.length} markets, ${positions.length} positions, ${board.length} wallets`);
+
+  // Markets: count, pools and status. The pools are the API's current ones, so
+  // a trade indexed while this runs shows as a mismatch: run it again.
+  const [count] = await viewCalls(rpc, P, [{ to: PM, signature: 'marketCount()', returns: ['uint256'] }]);
+  const live = markets.filter((m) => m.createdBlock <= P);
+  check('predict market count', !(count instanceof RpcError) && Number((count as any)[0]) === live.length, `chain ${(count as any)[0]}, indexer ${live.length}`);
+  const onChain = await viewCalls(rpc, P, live.map((m) => ({ to: PM, signature: 'markets(uint256)', args: [{ type: 'uint256', value: m.id }], returns: ['uint256', 'uint256', 'uint256', 'uint8', 'uint8'] })));
+  live.forEach((m, i) => {
+    const r = onChain[i] as any;
+    const status = m.settledBlock !== null && m.settledBlock <= P ? m.status : 0;
+    check(`market #${m.id} pools`, !(r instanceof RpcError) && String(r[1]) === m.poolYes && String(r[2]) === m.poolNo, r instanceof RpcError ? r.message : `chain ${r[1]}/${r[2]}, indexer ${m.poolYes}/${m.poolNo}`);
+    check(`market #${m.id} status`, !(r instanceof RpcError) && Number(r[3]) === status && (status !== 1 || Number(r[4]) === m.outcome));
+  });
+
+  // xp_balance against xpOfSeason, score = xp + claimable, and the board's
+  // claimable against the positions'.
+  const xp = await viewCalls(rpc, P, board.map((w) => ({ to: XP, signature: 'xpOfSeason(uint256,address)', args: [{ type: 'uint256', value: season.id }, { type: 'address', value: w.user }], returns: ['uint256'] })));
+  const wrongXp = board.filter((w, i) => xp[i] instanceof RpcError || String((xp[i] as any)[0]) !== w.xp);
+  check(`xp_balance vs xpOfSeason (${board.length})`, wrongXp.length === 0, wrongXp.slice(0, 3).map((w) => short(w.user)).join(', '));
+  const claimableByUser = new Map<string, bigint>();
+  for (const p of positions) claimableByUser.set(hex(p.user), (claimableByUser.get(hex(p.user)) ?? 0n) + BigInt(p.claimable));
+  const wrongSum = board.filter((w) => BigInt(w.score) !== BigInt(w.xp) + BigInt(w.claimable) || BigInt(w.claimable) !== (claimableByUser.get(hex(w.user)) ?? 0n));
+  check('leaderboard score = xp + claimable of positions', wrongSum.length === 0, wrongSum.slice(0, 3).map((w) => short(w.user)).join(', '));
+
+  // Positions against positionOf, every (market, wallet) ever traded.
+  const pos = await viewCalls(rpc, P, positions.map((p) => ({ to: PM, signature: 'positionOf(uint256,address)', args: [{ type: 'uint256', value: p.market }, { type: 'address', value: p.user }], returns: ['uint256', 'uint256', 'uint256', 'uint256'] })));
+  const wrongPos = positions.filter((p, i) => pos[i] instanceof RpcError || String((pos[i] as any)[0]) !== p.yesShares || String((pos[i] as any)[1]) !== p.noShares);
+  check(`positions vs positionOf (${positions.length})`, wrongPos.length === 0, wrongPos.slice(0, 3).map((p) => `#${p.market} ${short(p.user)}`).join(', '));
+
+  // claimable against claim(id) called as the wallet; a revert ("PM: nothing")
+  // means 0.
+  const settled = new Set(live.filter((m) => m.settledBlock !== null && m.settledBlock <= P).map((m) => m.id));
+  const claimRows = positions.filter((p) => settled.has(p.market));
+  const sim = await viewCalls(rpc, P, claimRows.map((p) => ({ to: PM, from: p.user, signature: 'claim(uint256)', args: [{ type: 'uint256', value: p.market }], returns: ['uint256'] })));
+  const wrongClaim = claimRows.filter((p, i) => (sim[i] instanceof RpcError ? '0' : String((sim[i] as any)[0])) !== p.claimable);
+  check(`claimable vs claim() (${claimRows.length})`, wrongClaim.length === 0, wrongClaim.slice(0, 3).map((p) => `#${p.market} ${short(p.user)} indexer ${p.claimable}`).join(', '));
+}
 
 for (const r of results) console.log(r);
 console.log(`\n${checks - failures}/${checks} checks passed`);

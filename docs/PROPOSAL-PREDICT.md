@@ -1,8 +1,12 @@
 # Proposal: Predict module
 
 Status: step 1 built 2026-10-28 as the Predict module on its own cursor,
-with quests and the sybil report ([INDEXER.md](INDEXER.md) §8.6, §8.7); the
-season-end export (§4.3) and the API of §5 beyond quests are not built. It fills the "Prediction Market
+with quests and the sybil report ([INDEXER.md](INDEXER.md) §8.6, §8.7);
+the ranking, the season-end export (§4.3), the API of §5 and the checks of
+§6 built 2026-10-29 ([INDEXER.md](INDEXER.md) §8.8, §11, §15). The scoring
+rules of §4.2 and the tie break are still proposals. `predict_positions`
+(§3) was not built: positions are replayed from trades and claims, which at
+this size is cheaper than keeping a table right. It fills the "Prediction Market
 handlers" line of [INDEXER.md](INDEXER.md) §16 and step 4.1 / 4.4 of
 `pauli-swap-prediction-market/docs/PLAN.md`.
 
@@ -120,8 +124,9 @@ season. Proposed definitions, to be confirmed:
 
 - **Active day**: a UTC day (`timestamp / 86400`, the contract's `today()`)
   on which the wallet has a `QuestCompleted`, `Bought` or `Sold`.
-- **Market traded**: a distinct market id with at least one `Bought` or
-  `Sold` by the wallet in the season.
+- **Market traded**: a distinct market id with at least one `Bought` by the
+  wallet in the season (the rule in the prediction-market repo's
+  `docs/PROPOSAL-SEASON-1-OPS.md` §6).
 - The season runs from `SeasonStarted` to `ends_at`, or to `SeasonClosed`
   if that comes first.
 

@@ -19,7 +19,7 @@ import { hexNum, Rpc } from './rpc.js';
 const TABLES = ['predict_seasons', 'predict_markets', 'predict_trades', 'predict_claims', 'predict_quests', 'predict_xp_events', 'wrap_events', 'faucet_drips'];
 
 /// Bump when a Predict handler change makes indexed rows wrong.
-const PREDICT_RULES = 1;
+const PREDICT_RULES = 2;
 
 const optional = (address: string | undefined) => (address ? hex(address) : null);
 
@@ -123,11 +123,14 @@ export class PredictIndexer {
     const a = d.args;
     const wallet = (v: string) => Buffer.from(hex(v), 'hex');
     const key = [d.block, d.logIndex, ts];
+    const tx = Buffer.from(d.txHash.replace(/^0x/, ''), 'hex');
     switch (d.name) {
       case 'SeasonStarted':
         return q.query(`INSERT INTO predict_seasons (id, ends_at, started_ts, started_block) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`, [Number(a.season), Number(a.endsAt), ts, d.block]);
       case 'SeasonClosed':
-        return q.query(`UPDATE predict_seasons SET closed_block = $2 WHERE id = $1`, [Number(a.season), d.block]);
+        return q.query(`UPDATE predict_seasons SET closed_block = $2, snapshot_block = $3, winners = $4 WHERE id = $1`, [
+          Number(a.season), d.block, Number(a.snapshotBlock), (a.winners as string[]).map(wallet),
+        ]);
       case 'XPCredited':
       case 'XPDebited': {
         const amount = BigInt(a.amount) * (d.name === 'XPDebited' ? -1n : 1n);
@@ -139,7 +142,7 @@ export class PredictIndexer {
         return q.query(`INSERT INTO predict_quests VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`, [...key, wallet(a.user), Number(a.questId), Number(a.day), BigInt(a.amount).toString()]);
       case 'MarketCreated':
         return q.query(
-          `INSERT INTO predict_markets (id, question, close_time, liquidity, created_block) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING`,
+          `INSERT INTO predict_markets (id, question, close_time, liquidity, pool_yes, pool_no, created_block) VALUES ($1, $2, $3, $4, $4, $4, $5) ON CONFLICT (id) DO NOTHING`,
           [Number(a.id), String(a.question), Number(a.closeTime), BigInt(a.liquidity).toString(), d.block],
         );
       case 'MarketResolved':
@@ -147,12 +150,23 @@ export class PredictIndexer {
       case 'MarketCancelled':
         return q.query(`UPDATE predict_markets SET status = 2, settled_block = $2 WHERE id = $1`, [Number(a.id), d.block]);
       case 'Bought':
-      case 'Sold':
-        return q.query(`INSERT INTO predict_trades VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`, [
-          ...key, Number(a.id), wallet(a.user), d.name === 'Bought' ? 0 : 1, Number(a.outcome), BigInt(d.name === 'Bought' ? a.xpIn : a.xpOut).toString(), BigInt(a.shares).toString(),
+      case 'Sold': {
+        const buy = d.name === 'Bought';
+        const xp = BigInt(buy ? a.xpIn : a.xpOut);
+        const shares = BigInt(a.shares);
+        // PredictMarket.buy / sell: the traded side moves by xp - shares, the
+        // other side by xp, in the direction of the trade.
+        const [traded, other] = buy ? [xp - shares, xp] : [shares - xp, -xp];
+        const [dYes, dNo] = Number(a.outcome) === 0 ? [traded, other] : [other, traded];
+        const inserted = await q.query(`INSERT INTO predict_trades VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING`, [
+          ...key, Number(a.id), wallet(a.user), buy ? 0 : 1, Number(a.outcome), xp.toString(), shares.toString(), tx,
         ]);
+        // A trade already seen must not move the pools twice.
+        if (!inserted.rowCount) return;
+        return q.query(`UPDATE predict_markets SET pool_yes = pool_yes + $2, pool_no = pool_no + $3 WHERE id = $1`, [Number(a.id), dYes.toString(), dNo.toString()]);
+      }
       case 'Claimed':
-        return q.query(`INSERT INTO predict_claims VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`, [...key, Number(a.id), wallet(a.user), BigInt(a.xp).toString()]);
+        return q.query(`INSERT INTO predict_claims VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`, [...key, Number(a.id), wallet(a.user), BigInt(a.xp).toString(), tx]);
       case 'Dripped':
         return q.query(`INSERT INTO faucet_drips VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`, [...key, wallet(a.to), BigInt(a.amount).toString()]);
       case 'Deposit':

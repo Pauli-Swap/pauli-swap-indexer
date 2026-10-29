@@ -5,7 +5,9 @@ import pg from 'pg';
 import { config } from './config.js';
 import { log } from './log.js';
 
-export const SCHEMA = 'acorn';
+/// DB_SCHEMA lets the tests run beside a live database without touching it.
+export const SCHEMA = process.env.DB_SCHEMA || 'acorn';
+if (!/^[a-z_][a-z0-9_]*$/.test(SCHEMA)) throw new Error(`DB_SCHEMA must be a lowercase identifier, got ${SCHEMA}`);
 const MIGRATIONS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 
 export function createPool(max: number, statementTimeoutMs?: number) {
@@ -27,7 +29,9 @@ export async function migrate(db: pg.Pool) {
     try {
       await client.query('BEGIN');
       await client.query(`SET LOCAL search_path = ${SCHEMA}`);
-      await client.query(fs.readFileSync(path.join(MIGRATIONS, file), 'utf8'));
+      // Migrations qualify names with `acorn.` where search_path does not
+      // apply (a function body); DB_SCHEMA renames them.
+      await client.query(fs.readFileSync(path.join(MIGRATIONS, file), 'utf8').replaceAll('acorn.', `${SCHEMA}.`));
       await client.query(`INSERT INTO ${SCHEMA}.schema_migrations (name) VALUES ($1)`, [file]);
       await client.query('COMMIT');
       log('info', 'migration applied', { file });

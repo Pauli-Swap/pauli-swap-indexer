@@ -326,6 +326,12 @@ API: `quests`, `questProgress(user, day)`, `questQueue(day)`. The attester
 (`pauli-swap-prediction-market/scripts/qrvm/attester.js`) credits
 `questQueue`; season quests are queued only under today.
 
+`004_predict_season.sql` (with `PREDICT_RULES` 2, which rebuilds the
+Predict tables) adds what the ranking and the Predict API need: the
+`closeSeason` record (`snapshot_block`, `winners`), the market pools behind
+`priceYes` (`pool_yes`, `pool_no`, moved by each `Bought` / `Sold` as
+`PredictMarket` moves them) and the transaction hash of each trade and claim.
+
 ### 8.7 Sybil report
 
 `npm run predict:sybil -- --season N` writes `sybil-season-N.json` for the
@@ -333,6 +339,59 @@ admin's review before prizes go out. It flags wallets; the admin decides and
 edits `quests/denylist.json`. The detection rules are kept out of this public
 repo so they cannot be gamed: the command loads `src/private/sybil.ts`
 (gitignored), installed from the private ops repo, and fails without it.
+
+### 8.8 Season ranking
+
+Built 2026-10-29 from [PROPOSAL-PREDICT.md](PROPOSAL-PREDICT.md) §4.
+`src/season.ts` replays the Predict tables up to a block B, block by block;
+the snapshot command and `predictLeaderboard` both call it, so the public
+board and the `closeSeason` export cannot disagree.
+
+- `score = xp + claimable`. `xp` is the season's `XPCredited` minus
+  `XPDebited` up to B, which is `xpOfSeason(S, user)` at B.
+- `claimable` is what claiming every market settled at B would pay, per
+  position as `PredictMarket.claim`: the winning shares of a resolved market,
+  `(yes + no) / 2` rounded down for a cancelled one, divided per position
+  before summing. A claim up to B empties the position. Markets open at B add
+  nothing; settled markets of any season count, since a claim credits the
+  current season.
+- Eligibility: at least `PREDICT_MIN_DAYS` (7) active days, UTC days with a
+  `QuestCompleted`, `Bought` or `Sold`, and at least `PREDICT_MIN_MARKETS` (3)
+  markets with a `Bought`, both inside `[SeasonStarted, endsAt)`.
+  These are the proposed season 1 rules (TODO 2.1), not yet confirmed.
+- Ties go to the wallet whose score last changed at the earlier block. The
+  score is taken at the end of each block, so a claim (`XPCredited`, then
+  `Claimed`) is not a change; a settlement is.
+
+`npm run predict:snapshot -- --block B [--season N]` (read only; on the VPS,
+`docker compose run --rm --no-deps -v <prediction-market>/quests:/quests:ro
+-v "$PWD/snapshots:/out" indexer node dist/cli.js snapshot --block B
+--denylist /quests/denylist.json --out /out/snapshot-season-1-block-B.json`:
+the container runs as `node` (uid 1000), so `snapshots/` must be writable by
+it, and a file written anywhere else is lost with the container. The sybil
+report is in the image only if `src/private/` was there when it was built)
+prints the top of the board and writes every wallet's
+`xp`, `claimable`, `score`, active days, markets, eligibility, `reachedBlock`,
+`denied` and `flagged` to `snapshot-season-N-block-B.json`, with the
+`closeSeason(snapshotBlock, winners)` arguments: the first three eligible
+wallets that are not denied, padded with the zero address.
+
+- `--min-days`, `--min-markets` override the rules; `--out` the file.
+- `--denylist` (default `../pauli-swap-prediction-market/quests/denylist.json`)
+  is read at run time, since the admin edits it after the sybil review.
+  Denied wallets keep their row, get no rank and are never winners.
+- The sybil report (§8.7) runs when installed (`--no-sybil` skips it). A
+  wallet it names gets `flagged: true` and nothing else: the reasons stay in
+  the private report.
+- Warnings, each of which makes the command exit 2 unless `--force`: B past
+  the Predict cursor; B before `endsAt`, while scores can still change;
+  markets still open at B; fewer than three eligible wallets; a winner
+  flagged by the sybil report; the season already closed; no denylist or no
+  sybil report.
+
+The proposal warned when B was *after* `endsAt`. That is the normal case
+(markets resolve after they close, and `closeSeason` requires `endsAt` to
+have passed), so the check is the other way round.
 
 ## 9. Pricing
 
@@ -482,6 +541,15 @@ no query fans out into per-row lookups. `first` is capped at 1000; page with
 | `tokenHourDatas`, `tokenDayDatas(token, from, to, first)` | QRL price OHLC, and `openUSD` … `closeUSD` |
 | `tokenHolders(token, first, skip)` | `account`, `balance`, largest first |
 | `transaction(hash)` | `block`, `from` |
+| `quests`, `questProgress(user, day)`, `questQueue(day)` | the quest catalogue, a wallet's progress, what the attester credits (§8.6) |
+| `predictSeason(id)` | `endsAt`, `startedBlock`, `active`, `closed`, `closedBlock`, `snapshotBlock`, `winners`; the latest season by default |
+| `predictMarkets(status, first, skip)`, `predictMarket(id)` | `question`, `closeTime`, `liquidity`, `status` (0 open, 1 resolved, 2 cancelled), `outcome`, `poolYes`, `poolNo`, `priceYes` (a fraction), `volumeXP`, `traders`, `trades`, created / settled block |
+| `predictTrades(market, user, first, skip)` | `side` (buy / sell), `outcome`, `xp`, `shares`, `block`, `logIndex`, `timestamp`, `txHash`; newest first |
+| `predictPositions(user, market, block, includeEmpty, first, skip)` | `yesShares`, `noShares`, `claimable` at `block` (default the Predict cursor) |
+| `predictLeaderboard(season, block, first, skip)` | the §8.8 ranking at `block` (default the Predict cursor): `minDays`, `minMarkets`, `openMarkets`, `total`, and per wallet `rank`, `user`, `xp`, `claimable`, `score`, `activeDays`, `marketsTraded`, `eligible`, `reachedBlock`. No denylist or sybil flags: those belong to the snapshot |
+
+XP amounts are wei strings (18 decimals). `_meta.predictBlock` is the Predict
+cursor, which every `predict*` query reads up to.
 
 Every USD field is nullable: `null` with `USD_SOURCE=none`, while
 `usdHidden` is true, or where no price covers the row's time (§9.4). A client
@@ -527,19 +595,29 @@ identically.
   `HOUR_DATA_DAYS`, `EVENT_DAYS`, `DISK_MIN_FREE_GB`, `CORS_ORIGIN`,
   `API_BIND`, `API_PORT`, and for USD (§9) `USD_SOURCE`, `USD_FEED`,
   `USD_FEED_MINUTES`, `USD_FEED_MAX_AGE_HOURS`, `STABLE_TOKENS`,
-  `MIN_USD_LIQUIDITY`, `USD_MAX_DEVIATION`. The compose file passes each one
+  `MIN_USD_LIQUIDITY`, `USD_MAX_DEVIATION`, and for the season ranking (§8.8)
+  `PREDICT_MIN_DAYS`, `PREDICT_MIN_MARKETS`. The compose file passes each one
   through by name, so a new setting needs a line there too.
 - **Docker network on the VPS.** A container on the bridge network cannot
-  reach a gqrl that listens on `127.0.0.1` only. Either gqrl listens on the
-  docker bridge address and `RPC_URL=http://host.docker.internal:8545` (mapped
-  in the compose file), or the indexer service uses `network_mode: host`
-  (Linux only) with `RPC_URL=http://127.0.0.1:8545`.
+  reach a gqrl that listens on `127.0.0.1` only. Three ways:
+  - gqrl listens on the docker bridge address and
+    `RPC_URL=http://host.docker.internal:8545` (mapped in the compose file);
+  - the indexer uses `network_mode: host` (Linux only) with
+    `RPC_URL=http://127.0.0.1:8545`;
+  - when gqrl runs in containers of its own, as on the VPS (Kurtosis), the
+    indexer uses `network_mode: host` and the node container's address. This
+    is what runs: `RPC_URL` set to the node's private address on port 8545. A second bridge network
+    cannot reach the chain's bridge, and joining `kt-qrl-devnet` can take
+    the chain containers' pinned IPs.
+  The VPS compose file lives in the infrastructure repo (`deploy/compose.yml`).
 - The API is published on `API_BIND` (default `127.0.0.1`); put nginx in front
   of it, or serve it same origin next to the interface's `/rpc`. Set
   `CORS_ORIGIN` to the interface's origin when it is called cross origin.
 - Commands (outside Docker): `npm run dev`, `npm run build && npm start`,
   `npm run migrate`, `npm run reindex`, `npm run audit` (§15),
-  `npm run sync:contracts`, `npm run sync:lib`.
+  `npm run sync:contracts`, `npm run sync:lib`, `npm run sync:predict`,
+  `npm run predict:sybil` (§8.7), `npm run predict:snapshot` (§8.8),
+  `npm test`.
 - **Reindex** drops the schema; the next start rebuilds it from the node. Stop
   the indexer first, since a running one does not expect its tables to
   vanish: `docker compose stop indexer && docker compose run --rm --no-deps
@@ -588,9 +666,16 @@ Postgres runs with `wal_level=minimal`, `max_wal_senders=0`,
 `archive_mode=off`, `max_wal_size=256MB`, `wal_compression=on`,
 `default_toast_compression=lz4`, `shared_buffers=128MB`.
 
+On the VPS, 2026-10-29 00:25 UTC, about 7 h after the devnet was
+regenerated: 96 GB disk, 25 GB used, all Docker volumes 828 MB, the indexer
+database 8.5 MB. None of `DISK_MIN_FREE_GB` (5), `EVENT_DAYS` (0) or
+`HOUR_DATA_DAYS` (90) comes close to binding, so season 1 keeps them. A
+second measurement a week later gives the growth per day.
+
 Not on the VPS: an archive node (`--gcmode archive`), which would grow the
-node's state without bound and which nothing here needs; and database
-backups, since `npm run reindex` rebuilds everything from the node.
+node's state without bound and which nothing here needs. A daily `pg_dump`
+(7 days kept, infrastructure repo) runs anyway; `npm run reindex` would
+rebuild the same data from the node.
 
 ---
 
@@ -615,6 +700,14 @@ exits 1 on any mismatch:
      `MIN_QRL_LIQUIDITY`);
    - `tvlUSD` equals `tvlQRL × qrlPriceUSD`;
    - `protocol` TVL and tracked count match the pools.
+7. with `--predict` (`npm run audit -- --predict`), at `_meta.predictBlock`:
+   - `marketCount()`, and each market's pools and status against
+     `markets(id)`;
+   - every leaderboard wallet's `xp` against `xpOfSeason(S, user)`, and its
+     `score` equal to `xp` plus the `claimable` of its positions;
+   - every (market, wallet) ever traded against `positionOf(id, user)`;
+   - on settled markets, `claimable` against `claim(id)` called as the
+     wallet (a revert, `PM: nothing`, means 0).
 
 Results on the devnet (2026-10-28): 236 / 236 checks pass. The first run
 found the `MINIMUM_LIQUIDITY` mint (§8.1), now fixed. Check 6 was added with
@@ -640,8 +733,19 @@ USD modes, run on the devnet for their mechanics only (2026-10-28):
     true and every USD field is `null`.
   - A rebuild drops `qrl_usd`; the feed refills it within seconds.
 
+Predict, on the regenerated devnet (2026-10-29, block 1953, season 1, four
+open markets, one position, three wallets): 106 / 106 checks pass with
+`--predict`. No market is settled yet, so the `claim(id)` check had nothing
+to compare; the claim arithmetic, cancelled markets included, is covered by
+`tests/season.test.ts` until the first market settles.
+
 Also run:
 
+- **Predict redeploy**: changing only `deployedAt` in `predict-devnet.json`
+  logs "predict deployment changed: rebuilding the predict tables" and
+  rebuilds `predict_*` from `startBlock` 41 in about a second. The pool
+  tables were not rewritten (same row versions in `pools`, same cursor, pool,
+  event and token counts).
 - **Wrong chain**: pointed at a local gqrl with chain id 1337, the indexer
   stops with `RPC chain id 1337 is not devnet.json's 3151908` and keeps its
   data.
@@ -664,6 +768,13 @@ Also run:
   devnet is 1,800 blocks old, so the RPC path still needs one `qrl_getLogs`
   per pool; its cost grows with history and the indexer's does not.
 
+`npm test` (CI on every push, `.github/workflows/ci.yml`, with `tsc` and the
+build) runs `tests/season.test.ts`, the ranking replay against
+`PredictMarket.claim`, and `tests/quests.test.ts`, the quest rules and the
+masking of hidden quests on a small fixed database. The database tests need
+`TEST_DATABASE_URL` and use their own schema (`DB_SCHEMA`, default
+`acorn_test`), which they drop; they refuse to run on `acorn`.
+
 ---
 
 ## 16. Not built yet, and open questions
@@ -679,12 +790,11 @@ Not in v1:
 - Subgraph-style `where` filters and time travel in the API.
 - Price jump filter and V3 TWAP pricing (§9.5).
 - `$` display in the interface; the USD field names in §11 are now settled.
-- The Predict season-end ranking export ([PROPOSAL-PREDICT.md](PROPOSAL-PREDICT.md)
-  §4.3); ingestion and quests are built (§8.6).
 
 Open:
 
-- VPS disk size, current use by gqrl and the beacon client, and growth per
-  day; this sets `DISK_MIN_FREE_GB`, `EVENT_DAYS` and `HOUR_DATA_DAYS`.
-- How gqrl is bound on the VPS (127.0.0.1 or the docker bridge), which picks
-  the network option in §13.
+- The season 1 scoring rules (TODO 2.1): active day, market traded, the
+  7 day / 3 market threshold, the tie break, and whether the public board
+  shows `score` or the XP balance. §8.8 builds the proposed answers behind
+  settings and flags.
+- Disk growth per day on the VPS (§14 has the first measurement).

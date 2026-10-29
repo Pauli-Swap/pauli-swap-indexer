@@ -1,12 +1,14 @@
 import http from 'node:http';
 import { buildSchema, graphql, GraphQLError } from 'graphql';
 import pg from 'pg';
-import { checksum, toBytes } from './address.js';
+import { checksum, render, toBytes } from './address.js';
 import { config } from './config.js';
+import { SCHEMA } from './db.js';
 import { Indexer } from './indexer.js';
 import { log } from './log.js';
 import { PredictIndexer } from './predict.js';
-import { QUESTS, Quests } from './quests.js';
+import { QUESTS, Quests, questText } from './quests.js';
+import { claimableOf, DEFAULT_RULES, loadClaims, loadMarkets, loadTrades, positions, seasonRow, standings } from './season.js';
 import { Usd, UsdView } from './usd.js';
 
 /// Read only, flat (no nested entities, so no N+1), served from entity tables
@@ -37,6 +39,8 @@ const schema = buildSchema(`
     usdDeviation: Float
     "true while usdDeviation exceeds USD_MAX_DEVIATION; USD fields are null meanwhile."
     usdHidden: Boolean!
+    "Last block the Predict module has indexed; every predict* query reads up to it."
+    predictBlock: Int!
   }
 
   type Token {
@@ -222,6 +226,93 @@ const schema = buildSchema(`
     quests: [QuestProgress!]!
   }
 
+  "XP amounts are wei strings (18 decimals)."
+  type PredictSeason {
+    id: Int!
+    endsAt: Int!
+    startedBlock: Int!
+    "Before endsAt (PauliPredictXP.seasonActive)."
+    active: Boolean!
+    closed: Boolean!
+    closedBlock: Int
+    snapshotBlock: Int
+    "The closeSeason record; null until closed."
+    winners: [String!]
+  }
+
+  type PredictMarket {
+    id: Int!
+    question: String!
+    closeTime: Int!
+    liquidity: String!
+    "0 open, 1 resolved, 2 cancelled."
+    status: Int!
+    "0 Yes, 1 No; null unless resolved."
+    outcome: Int
+    poolYes: String!
+    poolNo: String!
+    "PredictMarket.priceYes as a fraction: poolNo / (poolYes + poolNo)."
+    priceYes: Float!
+    "XP in through buys plus XP out through sells."
+    volumeXP: String!
+    traders: Int!
+    trades: Int!
+    createdBlock: Int!
+    settledBlock: Int
+  }
+
+  type PredictTrade {
+    "txHash#logIndex."
+    id: ID!
+    market: Int!
+    user: String!
+    "buy or sell."
+    side: String!
+    outcome: Int!
+    "XP in for a buy, out for a sell."
+    xp: String!
+    shares: String!
+    block: Int!
+    logIndex: Int!
+    timestamp: Int!
+    txHash: String!
+  }
+
+  type PredictPosition {
+    market: Int!
+    user: String!
+    yesShares: String!
+    noShares: String!
+    "What claim(market) would pay now; 0 while the market is open."
+    claimable: String!
+  }
+
+  type PredictStanding {
+    rank: Int!
+    user: String!
+    xp: String!
+    claimable: String!
+    "xp + claimable."
+    score: String!
+    activeDays: Int!
+    marketsTraded: Int!
+    eligible: Boolean!
+    "Last block at which the score changed; the earlier one ranks higher on a tie."
+    reachedBlock: Int
+  }
+
+  "The season ranking at a block, as the season-end snapshot computes it (docs/INDEXER.md §8.8), without its denylist and sybil flags."
+  type PredictLeaderboard {
+    season: Int!
+    block: Int!
+    minDays: Int!
+    minMarkets: Int!
+    "Markets open at block; they add nothing to claimable."
+    openMarkets: [Int!]!
+    total: Int!
+    standings: [PredictStanding!]!
+  }
+
   "createdBlock sorts ascending by default, the rest descending; tvlQRL ranks tracked pools first."
   enum PoolOrderBy { createdBlock tvlQRL volumeQRL txCount }
 
@@ -253,6 +344,17 @@ const schema = buildSchema(`
     questProgress(user: ID!, day: Int): QuestState!
     "Met but not yet credited quests for day (default today); what the attester sends."
     questQueue(day: Int): [QuestCredit!]!
+    "id defaults to the latest season."
+    predictSeason(id: Int): PredictSeason
+    "status 0 open, 1 resolved, 2 cancelled; newest first."
+    predictMarkets(status: Int, first: Int = 100, skip: Int = 0): [PredictMarket!]!
+    predictMarket(id: Int!): PredictMarket
+    "Newest first."
+    predictTrades(market: Int, user: ID, first: Int = 100, skip: Int = 0): [PredictTrade!]!
+    "Positions at block (default the Predict cursor); empty ones (claimed or sold out) only with includeEmpty."
+    predictPositions(user: ID, market: Int, block: Int, includeEmpty: Boolean = false, first: Int = 100, skip: Int = 0): [PredictPosition!]!
+    "season defaults to the latest, block to the Predict cursor."
+    predictLeaderboard(season: Int, block: Int, first: Int = 100, skip: Int = 0): PredictLeaderboard
   }
 `);
 
@@ -339,6 +441,13 @@ const TOKEN_PERIOD_SELECT = (table: string, length: number, u: UsdView) => {
   WHERE a.address = $1 AND r.period >= $2 AND r.period <= $3 ORDER BY r.period ASC LIMIT $4`;
 };
 
+const MARKET_SELECT = `SELECT m.id, m.question, m.close_time AS "closeTime", m.liquidity::text AS liquidity, m.status, m.outcome,
+  m.pool_yes::text AS "poolYes", m.pool_no::text AS "poolNo", (m.pool_no / (m.pool_yes + m.pool_no))::float8 AS "priceYes",
+  coalesce(t.volume, 0)::text AS "volumeXP", coalesce(t.traders, 0)::int AS traders, coalesce(t.trades, 0)::int AS trades,
+  m.created_block AS "createdBlock", m.settled_block AS "settledBlock"
+  FROM predict_markets m
+  LEFT JOIN LATERAL (SELECT sum(xp) AS volume, count(DISTINCT wallet) AS traders, count(*) AS trades FROM predict_trades WHERE market = m.id) t ON true`;
+
 /// Addresses leave the API in the node's checksummed case, so the interface
 /// shows the same `Qa1A6…34Ca` whether a row came from here or from RPC.
 const ADDRESS = /^Q[0-9a-f]{128}$/;
@@ -383,6 +492,7 @@ function resolvers(db: pg.Pool, indexer: Indexer, usd: Usd, predict: PredictInde
         startBlock: s.startBlock,
         hasIndexingErrors: !!s.lastError,
         lastError: s.lastError,
+        predictBlock: predict.status().cursor,
       };
     },
     protocol: async () => {
@@ -457,17 +567,85 @@ function resolvers(db: pg.Pool, indexer: Indexer, usd: Usd, predict: PredictInde
           WHERE ta.address = $1 AND b.balance > 0 ORDER BY b.balance DESC, b.account_id LIMIT $2 OFFSET $3`,
         [bytesOf([a.token])![0], ...page(a.first, a.skip)],
       ),
-    quests: () =>
-      QUESTS.map((q) => {
-        const masked = !!q.hidden;
-        return { id: q.id, kind: q.kind, hidden: masked, title: masked ? null : q.title, detail: masked ? null : q.detail, xp: masked ? null : q.xp, action: masked ? null : (q.action ?? null), target: masked ? null : q.target };
-      }),
+    quests: () => QUESTS.map((q) => ({ id: q.id, kind: q.kind, hidden: !!q.hidden, ...questText(q, false) })),
     questProgress: async (a: { user: string; day?: number }) => {
       const day = a.day ?? today();
       const season = await quests.season();
       return { day, season: season?.id ?? null, seasonEndsAt: season?.endsAt ?? null, block: predict.status().cursor, quests: await quests.progress(userOf(a.user), day) };
     },
     questQueue: async (a: { day?: number }) => (await quests.queue(a.day ?? today())).map(checksumRow),
+    predictSeason: async (a: { id?: number }) => {
+      const r = await seasonRow(db, a.id);
+      if (!r) return null;
+      return {
+        id: r.id,
+        endsAt: r.endsAt,
+        startedBlock: r.startedBlock,
+        active: Date.now() / 1000 < r.endsAt,
+        closed: r.closedBlock !== null,
+        closedBlock: r.closedBlock,
+        snapshotBlock: r.snapshotBlock,
+        winners: r.winners?.map(checksum) ?? null,
+      };
+    },
+    predictMarkets: (a: { status?: number; first: number; skip: number }) =>
+      many(`${MARKET_SELECT} WHERE $1::int2 IS NULL OR m.status = $1 ORDER BY m.id DESC LIMIT $2 OFFSET $3`, [a.status ?? null, ...page(a.first, a.skip)]),
+    predictMarket: (a: { id: number }) => one(`${MARKET_SELECT} WHERE m.id = $1`, [a.id]),
+    predictTrades: async (a: { market?: number; user?: string; first: number; skip: number }) => {
+      const rows = await many(
+        `SELECT t.market, ${addr('t.wallet')} AS user, t.side, t.outcome, t.xp::text AS xp, t.shares::text AS shares, t.block_number AS block,
+                t.log_index AS "logIndex", t.ts AS timestamp, '0x' || encode(t.tx_hash, 'hex') AS "txHash"
+           FROM predict_trades t WHERE ($1::int4 IS NULL OR t.market = $1) AND ($2::bytea IS NULL OR t.wallet = $2)
+          ORDER BY t.block_number DESC, t.log_index DESC LIMIT $3 OFFSET $4`,
+        [a.market ?? null, a.user ? bytesOf([a.user])![0] : null, ...page(a.first, a.skip)],
+      );
+      return rows.map((r) => ({ ...r, id: `${r.txHash}#${r.logIndex}`, side: r.side === 0 ? 'buy' : 'sell' }));
+    },
+    predictPositions: async (a: { user?: string; market?: number; block?: number; includeEmpty: boolean; first: number; skip: number }) => {
+      const wallet = a.user ? bytesOf([a.user])![0] : undefined;
+      const [first, skip] = page(a.first, a.skip);
+      const cursor = predict.status().cursor;
+      const block = a.block ?? cursor;
+      if (block > cursor) throw new GraphQLError(`block ${block} is past the Predict cursor ${cursor}`);
+      const [markets, trades, claims] = await Promise.all([loadMarkets(db), loadTrades(db, block, wallet, a.market), loadClaims(db, block, wallet, a.market)]);
+      const byId = new Map(markets.map((m) => [m.id, m]));
+      return positions(trades, claims)
+        .filter((p) => a.includeEmpty || p.yes > 0n || p.no > 0n)
+        .sort((x, y) => y.market - x.market || (x.wallet < y.wallet ? -1 : 1))
+        .slice(skip, skip + first)
+        .map((p) => {
+          const m = byId.get(p.market);
+          const claimable = m ? claimableOf(m, m.settledBlock !== null && m.settledBlock <= block ? m.status : 0, p) : 0n;
+          return { market: p.market, user: checksum(render(p.wallet)), yesShares: p.yes.toString(), noShares: p.no.toString(), claimable: claimable.toString() };
+        });
+    },
+    predictLeaderboard: async (a: { season?: number; block?: number; first: number; skip: number }) => {
+      const season = await seasonRow(db, a.season);
+      if (!season) return null;
+      const cursor = predict.status().cursor;
+      const block = a.block ?? cursor;
+      if (block > cursor) throw new GraphQLError(`block ${block} is past the Predict cursor ${cursor}`);
+      const [first, skip] = page(a.first, a.skip);
+      const { rows, openMarkets } = await standings(db, season, block, DEFAULT_RULES);
+      return {
+        season: season.id,
+        block,
+        ...DEFAULT_RULES,
+        openMarkets,
+        total: rows.length,
+        standings: rows.slice(skip, skip + first).map((r) => ({
+          rank: r.rank,
+          user: checksum(render(r.user)),
+          xp: r.xp.toString(),
+          claimable: r.claimable.toString(),
+          score: r.score.toString(),
+          activeDays: r.activeDays,
+          marketsTraded: r.marketsTraded,
+          eligible: r.eligible,
+          reachedBlock: r.reachedBlock,
+        })),
+      };
+    },
     transaction: (a: { hash: string }) => {
       if (!/^0x[0-9a-fA-F]{64}$/.test(a.hash)) throw new GraphQLError('hash must be 0x + 64 hex');
       return one(
@@ -502,7 +680,8 @@ export function startApi(db: pg.Pool, indexer: Indexer, usd: Usd, predict: Predi
               (SELECT json_agg(x) FROM (
                  SELECT c.relname AS table, pg_total_relation_size(c.oid) AS bytes FROM pg_class c
                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = 'acorn' AND c.relkind IN ('r', 'p') ORDER BY 2 DESC LIMIT 5) x) AS largest`,
+                  WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') ORDER BY 2 DESC LIMIT 5) x) AS largest`,
+      [SCHEMA],
     );
     // The USD feed reports on its own and does not affect `ok`.
     return { ok: !s.lastError && !s.paused, ...s, usd: usd.status(), predict: predict.status(), dbBytes: Number(rows[0].db_bytes), largestTables: rows[0].largest ?? [], freeDiskBytes: indexer.freeDiskBytes() };

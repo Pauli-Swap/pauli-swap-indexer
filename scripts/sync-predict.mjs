@@ -10,13 +10,16 @@ const repo = path.resolve(process.argv[2] ?? '../pauli-swap-prediction-market');
 const network = process.argv[3] ?? 'devnet';
 const out = path.resolve('src/contracts');
 const artifactsDir = path.join(repo, 'build', 'qrvm');
-const index = JSON.parse(fs.readFileSync(path.join(artifactsDir, 'index.json'), 'utf8'));
-
-fs.mkdirSync(path.join(out, 'abi'), { recursive: true });
-for (const name of ['PauliPredictXP', 'PredictMarket', 'QrlFaucet']) {
-  const [unit] = index[name];
-  const artifact = JSON.parse(fs.readFileSync(path.join(artifactsDir, unit, `${name}.json`), 'utf8'));
-  fs.writeFileSync(path.join(out, 'abi', `${name}.json`), JSON.stringify(artifact.abi, null, 2) + '\n');
+// Without build/qrvm (a fresh clone, as in CI) the ABIs committed here stay.
+const built = fs.existsSync(path.join(artifactsDir, 'index.json'));
+if (built) {
+  const index = JSON.parse(fs.readFileSync(path.join(artifactsDir, 'index.json'), 'utf8'));
+  fs.mkdirSync(path.join(out, 'abi'), { recursive: true });
+  for (const name of ['PauliPredictXP', 'PredictMarket', 'QrlFaucet']) {
+    const [unit] = index[name];
+    const artifact = JSON.parse(fs.readFileSync(path.join(artifactsDir, unit, `${name}.json`), 'utf8'));
+    fs.writeFileSync(path.join(out, 'abi', `${name}.json`), JSON.stringify(artifact.abi, null, 2) + '\n');
+  }
 }
 
 const read = (file) => {
@@ -35,4 +38,4 @@ const hiddenFile = path.join(repo, 'quests', 'hidden.json');
 const hidden = fs.existsSync(hiddenFile) ? JSON.parse(fs.readFileSync(hiddenFile, 'utf8')).quests : [];
 catalogue.quests.push(...hidden.map((q) => ({ ...q, hidden: true })));
 fs.writeFileSync(path.join(out, 'quests.json'), JSON.stringify(catalogue, null, 2) + '\n');
-console.log(`synced Predict ABIs, predict ${predict ? `startBlock ${predict.startBlock}` : 'not deployed'}, faucet ${faucet ? `startBlock ${faucet.startBlock}` : 'not deployed'}, quest catalogue (${hidden.length} hidden)`);
+console.log(`synced ${built ? 'Predict ABIs' : 'no ABIs (no build/qrvm)'}, predict ${predict ? `startBlock ${predict.startBlock}` : 'not deployed'}, faucet ${faucet ? `startBlock ${faucet.startBlock}` : 'not deployed'}, quest catalogue (${hidden.length} hidden)`);

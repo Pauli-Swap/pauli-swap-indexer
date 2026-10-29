@@ -3,7 +3,9 @@
 # RPC_URL on the VPS: a container on the default bridge network cannot reach a
 # gqrl that listens on 127.0.0.1 only. Either make gqrl listen on the docker
 # bridge address (RPC_URL=http://host.docker.internal:8545, mapped below), or
-# run the indexer with `network_mode: host` (Linux only) and RPC_URL=http://127.0.0.1:8545.
+# run the indexer with `network_mode: host` (Linux only) and RPC_URL=http://127.0.0.1:8545,
+# or, when gqrl runs in containers of its own, `network_mode: host` and the node
+# container's address (docs/INDEXER.md §13; the VPS uses this).
 
 x-logging: &logging
   driver: json-file
@@ -65,6 +67,9 @@ services:
       STABLE_TOKENS: ${STABLE_TOKENS:-}
       MIN_USD_LIQUIDITY: ${MIN_USD_LIQUIDITY:-10000}
       BRIDGE_TOKENS: ${BRIDGE_TOKENS:-}
+      # Season eligibility (docs/INDEXER.md §8.8): predictLeaderboard and the snapshot.
+      PREDICT_MIN_DAYS: ${PREDICT_MIN_DAYS:-7}
+      PREDICT_MIN_MARKETS: ${PREDICT_MIN_MARKETS:-3}
       # The Postgres volume, mounted read only, so the disk guard sees its free space.
       DISK_PATH: /pgdata
       DISK_MIN_FREE_GB: ${DISK_MIN_FREE_GB:-5}
