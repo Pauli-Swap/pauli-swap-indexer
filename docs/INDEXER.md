@@ -337,9 +337,10 @@ repo so they cannot be gamed: the command loads `src/private/sybil.ts`
 ## 9. Pricing
 
 Base unit is QRL through WQRL, as in the interface. USD is a conversion of QRL
-values, made when the API reads them, and is off on the devnet. Adopted from
-[PROPOSAL-USD-PRICING.md](PROPOSAL-USD-PRICING.md), which follows Uniswap
-Labs' approach: canonical pool, stable or WETH route to USD, filtering.
+values, made when the API reads them, and is off on the devnet. It follows
+Uniswap Labs' approach: canonical pool, stable or WETH route to USD,
+filtering. (The original proposal, accepted and built on 2026-10-28, is in git
+history as `docs/PROPOSAL-USD-PRICING.md`.)
 
 ### 9.1 QRL prices
 
