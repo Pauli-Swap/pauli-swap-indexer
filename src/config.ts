@@ -56,6 +56,9 @@ export const config = {
   // Season eligibility (§8.8), shared by predictLeaderboard and the snapshot.
   predictMinDays: num('PREDICT_MIN_DAYS', 7),
   predictMinMarkets: num('PREDICT_MIN_MARKETS', 3),
+  /// quests/denylist.json of pauli-swap-prediction-market; questProgress
+  /// reports `denied` for its wallets. Empty: nobody is denied.
+  denylistPath: env('DENYLIST_PATH', ''),
 };
 
 if (config.usdSource === 'stable' && !config.stableTokens.length) throw new Error('USD_SOURCE=stable needs STABLE_TOKENS');

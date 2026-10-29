@@ -1,9 +1,10 @@
 import http from 'node:http';
 import { buildSchema, graphql, GraphQLError } from 'graphql';
 import pg from 'pg';
-import { checksum, render, toBytes } from './address.js';
+import { checksum, hex, render, toBytes } from './address.js';
 import { config } from './config.js';
 import { SCHEMA } from './db.js';
+import { readDenylist } from './denylist.js';
 import { Indexer } from './indexer.js';
 import { log } from './log.js';
 import { PredictIndexer } from './predict.js';
@@ -223,6 +224,8 @@ const schema = buildSchema(`
     seasonEndsAt: Int
     "Last block the Predict module has indexed."
     block: Int!
+    "The wallet is on quests/denylist.json: the attester never credits it."
+    denied: Boolean!
     quests: [QuestProgress!]!
   }
 
@@ -571,7 +574,7 @@ function resolvers(db: pg.Pool, indexer: Indexer, usd: Usd, predict: PredictInde
     questProgress: async (a: { user: string; day?: number }) => {
       const day = a.day ?? today();
       const season = await quests.season();
-      return { day, season: season?.id ?? null, seasonEndsAt: season?.endsAt ?? null, block: predict.status().cursor, quests: await quests.progress(userOf(a.user), day) };
+      return { day, season: season?.id ?? null, seasonEndsAt: season?.endsAt ?? null, block: predict.status().cursor, denied: readDenylist(config.denylistPath).has(hex(userOf(a.user))), quests: await quests.progress(userOf(a.user), day) };
     },
     questQueue: async (a: { day?: number }) => (await quests.queue(a.day ?? today())).map(checksumRow),
     predictSeason: async (a: { id?: number }) => {

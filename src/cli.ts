@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { checksum, hex, render } from './address.js';
 import { config } from './config.js';
 import { createPool, migrate, resetSchema } from './db.js';
+import { readDenylist } from './denylist.js';
 import { log } from './log.js';
 import { hexNum, Rpc } from './rpc.js';
 import { DEFAULT_RULES, predictCursor, seasonRow, standings, winnersOf } from './season.js';
@@ -79,9 +80,8 @@ async function snapshot() {
   // quests/denylist.json is edited by the admin after the sybil review, so it
   // is read where it lives, at the time of the snapshot.
   const denylistPath = arg('--denylist') ?? '../pauli-swap-prediction-market/quests/denylist.json';
-  let denied = new Set<string>();
-  if (fs.existsSync(denylistPath)) denied = new Set((JSON.parse(fs.readFileSync(denylistPath, 'utf8')).wallets as string[]).map(hex));
-  else warnings.push(`no denylist at ${denylistPath}: nobody is excluded`);
+  const denied = readDenylist(denylistPath);
+  if (!fs.existsSync(denylistPath)) warnings.push(`no denylist at ${denylistPath}: nobody is excluded`);
 
   let flagged = new Set<string>();
   if (!flag('--no-sybil')) {

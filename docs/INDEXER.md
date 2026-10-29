@@ -541,7 +541,7 @@ no query fans out into per-row lookups. `first` is capped at 1000; page with
 | `tokenHourDatas`, `tokenDayDatas(token, from, to, first)` | QRL price OHLC, and `openUSD` … `closeUSD` |
 | `tokenHolders(token, first, skip)` | `account`, `balance`, largest first |
 | `transaction(hash)` | `block`, `from` |
-| `quests`, `questProgress(user, day)`, `questQueue(day)` | the quest catalogue, a wallet's progress, what the attester credits (§8.6) |
+| `quests`, `questProgress(user, day)`, `questQueue(day)` | the quest catalogue, a wallet's progress and whether it is on the denylist (`denied`, from `DENYLIST_PATH`), what the attester credits (§8.6) |
 | `predictSeason(id)` | `endsAt`, `startedBlock`, `active`, `closed`, `closedBlock`, `snapshotBlock`, `winners`; the latest season by default |
 | `predictMarkets(status, first, skip)`, `predictMarket(id)` | `question`, `closeTime`, `liquidity`, `status` (0 open, 1 resolved, 2 cancelled), `outcome`, `poolYes`, `poolNo`, `priceYes` (a fraction), `volumeXP`, `traders`, `trades`, created / settled block |
 | `predictTrades(market, user, first, skip)` | `side` (buy / sell), `outcome`, `xp`, `shares`, `block`, `logIndex`, `timestamp`, `txHash`; newest first |
