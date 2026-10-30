@@ -48,6 +48,8 @@ export type Standing = {
   reachedBlock: number | null;
   /// 1-based over wallets not denied; null for a denied wallet.
   rank: number | null;
+  /// 1-based over eligible wallets not denied (the prize order); null otherwise.
+  eligibleRank: number | null;
   denied: boolean;
 };
 
@@ -186,6 +188,7 @@ export function rank(input: RankInput): Standing[] {
       eligible: activeDays >= rules.minDays && marketsTraded >= rules.minMarkets,
       reachedBlock: reached.get(w) ?? null,
       rank: null,
+      eligibleRank: null,
       denied: !!input.denied?.has(w),
     };
   });
@@ -197,7 +200,12 @@ export function rank(input: RankInput): Standing[] {
       (a.user < b.user ? -1 : 1),
   );
   let n = 0;
-  for (const r of rows) if (!r.denied) r.rank = ++n;
+  let e = 0;
+  for (const r of rows) {
+    if (r.denied) continue;
+    r.rank = ++n;
+    if (r.eligible) r.eligibleRank = ++e;
+  }
   return rows;
 }
 

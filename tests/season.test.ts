@@ -95,3 +95,25 @@ test('denied wallets get no rank and no prize; winners are padded', () => {
   const strict = rank(input({ xp: [xp(5, A, 100n), xp(5, B, 50n)], rules: { minDays: 1, minMarkets: 0 } }));
   assert.deepEqual(winnersOf(strict), [ZERO_WALLET, ZERO_WALLET, ZERO_WALLET], 'nobody had an active day');
 });
+
+test('eligibleRank counts eligible wallets only, skipping the denied', () => {
+  const q = (w: string) => ({ block: 1, ts: 11 * DAY, wallet: w });
+  const rows = rank(input({ xp: [xp(5, A, 100n), xp(5, B, 50n), xp(5, C, 10n)], quests: [q(A), q(C)], denied: new Set([A]), rules: { minDays: 1, minMarkets: 0 } }));
+  assert.deepEqual(rows.map((r) => [r.user, r.rank, r.eligibleRank]), [[B, 1, null], [C, 2, 1], [A, null, null]]);
+});
+
+test('settle(id, users[]): every Claimed of one transaction empties its position', () => {
+  // One settle transaction at block 70: XPCredited then Claimed per user,
+  // consecutive log indexes in one block.
+  const markets = [market(0, 1, 0, 50)];
+  const trades = [buy(10, A, 0, 0, 5n), buy(11, B, 0, 0, 3n), buy(12, C, 0, 1, 4n)];
+  const claims = [A, B, C].map((w) => claim(70, w, 0));
+  assert.deepEqual(positions(trades, claims).map((p) => [p.wallet, p.yes, p.no]), [[A, 0n, 0n], [B, 0n, 0n], [C, 0n, 0n]]);
+  const before = byUser(rank(input({ markets, trades })));
+  const after = byUser(rank(input({ markets, trades, claims, xp: [xp(70, A, 5n), xp(70, B, 3n)] })));
+  for (const w of [A, B, C]) {
+    assert.equal(after.get(w)!.claimable, 0n);
+    assert.equal(after.get(w)!.score, before.get(w)!.score);
+    assert.equal(after.get(w)!.reachedBlock, before.get(w)!.reachedBlock);
+  }
+});

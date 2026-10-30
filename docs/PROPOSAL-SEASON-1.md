@@ -110,3 +110,52 @@ tables on deploy.
   protocol day data.
 - Price jump filter, V3 TWAP pricing, `where` filters, time travel.
 - `getterSuspect` (sampled `balanceOf`) and `slot0()` reconciliation at the tip.
+
+## 7. What the interface needs (from `pauli-swap-interface/docs/PROPOSAL-SEASON-1.md`)
+
+Added 2026-10-30. Two changes upstream shape this: the prediction-market
+repo redeploys the whole Predict pair, and a settled market now pays its
+holders automatically through `settle(id, users[])` (its OPS proposal §9).
+The interface moves its leaderboard, markets and positions onto the §3 API,
+falling back to its log replay when the indexer is down or lagging.
+
+- [ ] After the redeploy: `sync:predict`, let `predict-devnet.json` change
+      rebuild the `predict_*` tables from the new start block (the path
+      tested in §2), push to the VPS. Waiting: on 2026-10-30 the
+      prediction-market repo still has the 2026-10-28 deployment and no
+      `settle` (its OPS §9.1 and §9.2 are open).
+- [x] `settle` emits the existing `Claimed(id, user, xp)` once per user, so
+      positions and `claimable` need no new handler. Check that a batch of
+      `Claimed` in one transaction (several log indexes) is applied in full.
+      Each is its own `(block, log_index)` row; `tests/season.test.ts`
+      settles three holders in one block and checks that every position
+      empties and no score or `reachedBlock` moves. To check on the chain
+      once `settle` is deployed (`npm run audit -- --predict`).
+- [x] The attester reads holders with `predictPositions(market: id)`; keep
+      empty positions out by default and keep the query cheap for one
+      market. Empty positions were already left out without `includeEmpty`;
+      migration `005_predict_claims_market.sql` indexes claims by market, as
+      `predict_trades_market` does for trades.
+- [ ] `PauliPredictXP` will allow more than one market
+      (`setMarket(market, allowed)`). Season 1 runs one, which
+      `predict-devnet.json` names. Before a second market contract goes live,
+      index `PredictMarket` events by the set of allowed markets rather than
+      one address. Not for now: Season 1 has one market contract.
+- [ ] Deploy the build with the Predict API (§3) to the VPS before the
+      interface switches over.
+- [x] `predictPriceHistory(market: Int!, from: Int, first: Int)`: the Yes
+      price after each trade (block, timestamp, `priceYes`), plus the price
+      24 h ago, for the market chart and its 24 h change. `PredictTrade` has
+      no pool state after the trade, so the interface cannot build the chart
+      from `predictTrades` without replaying the pool itself; the replay
+      already runs here (`src/predict.ts`). Built: `priceYes`,
+      `priceYes24hAgo` (0.5, the opening price, when no trade is older than
+      24 h) and `points` (`block`, `logIndex`, `timestamp`, `priceYes`),
+      oldest first, `from` a timestamp. The replay shares `poolDelta` with
+      the indexer and matches `predict_markets` on the devnet (market #0).
+- [x] PROPOSAL-PREDICT.md §4.3 still says to warn when "`B` later than
+      `ends_at`"; the code and §1 above warn when B is **before** `endsAt`.
+      Fix the doc.
+- [x] (Optional) An `eligibleRank` on `PredictStanding`, rank among eligible
+      wallets only, so the board and the prize column do not re-rank in the
+      browser. Null for a wallet that is not eligible.

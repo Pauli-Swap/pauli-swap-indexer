@@ -361,7 +361,11 @@ board and the `closeSeason` export cannot disagree.
   These are the proposed season 1 rules (TODO 2.1), not yet confirmed.
 - Ties go to the wallet whose score last changed at the earlier block. The
   score is taken at the end of each block, so a claim (`XPCredited`, then
-  `Claimed`) is not a change; a settlement is.
+  `Claimed`) is not a change; a settlement is. `settle(id, users[])` pays
+  several holders in one transaction with the same events, one `Claimed`
+  per user, each its own row.
+- `rank` counts every wallet not denied; `eligibleRank` only the eligible
+  ones, which is the prize order.
 
 `npm run predict:snapshot -- --block B [--season N]` (read only; on the VPS,
 `docker compose run --rm --no-deps -v <prediction-market>/quests:/quests:ro
@@ -547,8 +551,9 @@ no query fans out into per-row lookups. `first` is capped at 1000; page with
 | `predictSeason(id)` | `endsAt`, `startedBlock`, `active`, `closed`, `closedBlock`, `snapshotBlock`, `winners`; the latest season by default |
 | `predictMarkets(status, first, skip)`, `predictMarket(id)` | `question`, `closeTime`, `liquidity`, `status` (0 open, 1 resolved, 2 cancelled), `outcome`, `poolYes`, `poolNo`, `priceYes` (a fraction), `volumeXP`, `traders`, `trades`, created / settled block |
 | `predictTrades(market, user, first, skip)` | `side` (buy / sell), `outcome`, `xp`, `shares`, `block`, `logIndex`, `timestamp`, `txHash`; newest first |
-| `predictPositions(user, market, block, includeEmpty, first, skip)` | `yesShares`, `noShares`, `claimable` at `block` (default the Predict cursor) |
-| `predictLeaderboard(season, block, first, skip)` | the §8.8 ranking at `block` (default the Predict cursor): `minDays`, `minMarkets`, `openMarkets`, `total`, and per wallet `rank`, `user`, `xp`, `claimable`, `score`, `activeDays`, `marketsTraded`, `eligible`, `reachedBlock`. No denylist or sybil flags: those belong to the snapshot |
+| `predictPriceHistory(market, from, first)` | `priceYes` now, `priceYes24hAgo` (after the last trade at or before now - 24 h, else the opening 0.5), and `points`: `block`, `logIndex`, `timestamp`, `priceYes` after each trade with `timestamp >= from`, oldest first. Replayed from the market's `liquidity` and its trades with the pool update of §8.6 |
+| `predictPositions(user, market, block, includeEmpty, first, skip)` | `yesShares`, `noShares`, `claimable` at `block` (default the Predict cursor); empty positions only with `includeEmpty`. The attester reads a settled market's holders with `predictPositions(market: id)` before `settle(id, users[])` |
+| `predictLeaderboard(season, block, first, skip)` | the §8.8 ranking at `block` (default the Predict cursor): `minDays`, `minMarkets`, `openMarkets`, `total`, and per wallet `rank`, `user`, `xp`, `claimable`, `score`, `activeDays`, `marketsTraded`, `eligible`, `eligibleRank`, `reachedBlock`. No denylist or sybil flags: those belong to the snapshot |
 
 XP amounts are wei strings (18 decimals). `_meta.predictBlock` is the Predict
 cursor, which every `predict*` query reads up to.

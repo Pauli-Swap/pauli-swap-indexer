@@ -23,6 +23,34 @@ const PREDICT_RULES = 2;
 
 const optional = (address: string | undefined) => (address ? hex(address) : null);
 
+/// How a Bought (side 0) or Sold (side 1) moves the pools, as
+/// PredictMarket.buy / sell do: the traded side by xp - shares, the other
+/// side by xp, in the direction of the trade.
+export function poolDelta(t: { side: number; outcome: number; xp: bigint; shares: bigint }): [dYes: bigint, dNo: bigint] {
+  const [traded, other] = t.side === 0 ? [t.xp - t.shares, t.xp] : [t.shares - t.xp, -t.xp];
+  return t.outcome === 0 ? [traded, other] : [other, traded];
+}
+
+/// PredictMarket.priceYes as a fraction: poolNo / (poolYes + poolNo).
+export const priceYesOf = (yes: bigint, no: bigint) => (yes + no === 0n ? 0.5 : Number((no * 10n ** 18n) / (yes + no)) / 1e18);
+
+export type PricePoint = { block: number; logIndex: number; timestamp: number; priceYes: number };
+
+/// The Yes price after each trade, oldest first, replaying the pools from
+/// MarketCreated (both pools at `liquidity`, price 0.5).
+export function priceHistory(liquidity: bigint, trades: { block: number; logIndex: number; ts: number; side: number; outcome: number; xp: bigint; shares: bigint }[]): PricePoint[] {
+  let yes = liquidity;
+  let no = liquidity;
+  return [...trades]
+    .sort((a, b) => a.block - b.block || a.logIndex - b.logIndex)
+    .map((t) => {
+      const [dYes, dNo] = poolDelta(t);
+      yes += dYes;
+      no += dNo;
+      return { block: t.block, logIndex: t.logIndex, timestamp: t.ts, priceYes: priceYesOf(yes, no) };
+    });
+}
+
 export class PredictIndexer {
   readonly xp = optional(predictDeployment.contracts.PauliPredictXP);
   readonly market = optional(predictDeployment.contracts.PredictMarket);
@@ -154,10 +182,7 @@ export class PredictIndexer {
         const buy = d.name === 'Bought';
         const xp = BigInt(buy ? a.xpIn : a.xpOut);
         const shares = BigInt(a.shares);
-        // PredictMarket.buy / sell: the traded side moves by xp - shares, the
-        // other side by xp, in the direction of the trade.
-        const [traded, other] = buy ? [xp - shares, xp] : [shares - xp, -xp];
-        const [dYes, dNo] = Number(a.outcome) === 0 ? [traded, other] : [other, traded];
+        const [dYes, dNo] = poolDelta({ side: buy ? 0 : 1, outcome: Number(a.outcome), xp, shares });
         const inserted = await q.query(`INSERT INTO predict_trades VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING`, [
           ...key, Number(a.id), wallet(a.user), buy ? 0 : 1, Number(a.outcome), xp.toString(), shares.toString(), tx,
         ]);
@@ -165,6 +190,9 @@ export class PredictIndexer {
         if (!inserted.rowCount) return;
         return q.query(`UPDATE predict_markets SET pool_yes = pool_yes + $2, pool_no = pool_no + $3 WHERE id = $1`, [Number(a.id), dYes.toString(), dNo.toString()]);
       }
+      // One per user for claim(id), and for each user paid by
+      // settle(id, users[]): a batch is several log indexes of one
+      // transaction, each its own row.
       case 'Claimed':
         return q.query(`INSERT INTO predict_claims VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`, [...key, Number(a.id), wallet(a.user), BigInt(a.xp).toString(), tx]);
       case 'Dripped':

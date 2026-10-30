@@ -7,7 +7,7 @@ import { SCHEMA } from './db.js';
 import { readDenylist } from './denylist.js';
 import { Indexer } from './indexer.js';
 import { log } from './log.js';
-import { PredictIndexer } from './predict.js';
+import { PredictIndexer, priceHistory } from './predict.js';
 import { QUESTS, Quests, questText } from './quests.js';
 import { claimableOf, DEFAULT_RULES, loadClaims, loadMarkets, loadTrades, positions, seasonRow, standings } from './season.js';
 import { Usd, UsdView } from './usd.js';
@@ -300,6 +300,8 @@ const schema = buildSchema(`
     activeDays: Int!
     marketsTraded: Int!
     eligible: Boolean!
+    "Rank among eligible wallets only (the prize order); null when not eligible."
+    eligibleRank: Int
     "Last block at which the score changed; the earlier one ranks higher on a tie."
     reachedBlock: Int
   }
@@ -314,6 +316,24 @@ const schema = buildSchema(`
     openMarkets: [Int!]!
     total: Int!
     standings: [PredictStanding!]!
+  }
+
+  type PredictPricePoint {
+    block: Int!
+    logIndex: Int!
+    timestamp: Int!
+    "priceYes after this trade."
+    priceYes: Float!
+  }
+
+  type PredictPriceHistory {
+    market: Int!
+    "Now."
+    priceYes: Float!
+    "After the last trade at or before now - 24 h; 0.5 (the opening price) when there is none."
+    priceYes24hAgo: Float!
+    "One point per trade, oldest first. The market opens at 0.5 at createdBlock."
+    points: [PredictPricePoint!]!
   }
 
   "createdBlock sorts ascending by default, the rest descending; tvlQRL ranks tracked pools first."
@@ -354,6 +374,8 @@ const schema = buildSchema(`
     predictMarket(id: Int!): PredictMarket
     "Newest first."
     predictTrades(market: Int, user: ID, first: Int = 100, skip: Int = 0): [PredictTrade!]!
+    "The Yes price after each trade with timestamp >= from, oldest first."
+    predictPriceHistory(market: Int!, from: Int, first: Int = 1000): PredictPriceHistory
     "Positions at block (default the Predict cursor); empty ones (claimed or sold out) only with includeEmpty."
     predictPositions(user: ID, market: Int, block: Int, includeEmpty: Boolean = false, first: Int = 100, skip: Int = 0): [PredictPosition!]!
     "season defaults to the latest, block to the Predict cursor."
@@ -604,6 +626,23 @@ function resolvers(db: pg.Pool, indexer: Indexer, usd: Usd, predict: PredictInde
       );
       return rows.map((r) => ({ ...r, id: `${r.txHash}#${r.logIndex}`, side: r.side === 0 ? 'buy' : 'sell' }));
     },
+    predictPriceHistory: async (a: { market: number; from?: number; first: number }) => {
+      const m = (await db.query(`SELECT liquidity::text FROM predict_markets WHERE id = $1`, [a.market])).rows[0];
+      if (!m) return null;
+      const [first] = page(a.first, 0);
+      const { rows } = await db.query(
+        `SELECT block_number, log_index, ts, side, outcome, xp::text, shares::text FROM predict_trades WHERE market = $1`,
+        [a.market],
+      );
+      const points = priceHistory(BigInt(m.liquidity), rows.map((r) => ({ block: r.block_number, logIndex: r.log_index, ts: r.ts, side: r.side, outcome: r.outcome, xp: BigInt(r.xp), shares: BigInt(r.shares) })));
+      const dayAgo = Date.now() / 1000 - 86400;
+      return {
+        market: a.market,
+        priceYes: points.at(-1)?.priceYes ?? 0.5,
+        priceYes24hAgo: points.filter((p) => p.timestamp <= dayAgo).at(-1)?.priceYes ?? 0.5,
+        points: points.filter((p) => p.timestamp >= (a.from ?? 0)).slice(0, first),
+      };
+    },
     predictPositions: async (a: { user?: string; market?: number; block?: number; includeEmpty: boolean; first: number; skip: number }) => {
       const wallet = a.user ? bytesOf([a.user])![0] : undefined;
       const [first, skip] = page(a.first, a.skip);
@@ -645,6 +684,7 @@ function resolvers(db: pg.Pool, indexer: Indexer, usd: Usd, predict: PredictInde
           activeDays: r.activeDays,
           marketsTraded: r.marketsTraded,
           eligible: r.eligible,
+          eligibleRank: r.eligibleRank,
           reachedBlock: r.reachedBlock,
         })),
       };

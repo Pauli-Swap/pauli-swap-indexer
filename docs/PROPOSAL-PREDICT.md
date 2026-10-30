@@ -140,7 +140,9 @@ JSON:
 - the top 3 eligible wallets, which are the `winners` argument for
   `closeSeason`;
 - warnings: markets still open at `B`, `B` past the indexed cursor, and
-  `B` later than `ends_at`.
+  `B` before `ends_at`, while scores can still change. (This said "later
+  than"; a snapshot normally comes after `ends_at`, since markets resolve
+  after they close and `closeSeason` requires it. See INDEXER.md §8.8.)
 
 Ties are broken by the earlier block at which the wallet reached its score;
 this needs confirming.
