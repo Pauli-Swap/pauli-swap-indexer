@@ -119,11 +119,13 @@ holders automatically through `settle(id, users[])` (its OPS proposal §9).
 The interface moves its leaderboard, markets and positions onto the §3 API,
 falling back to its log replay when the indexer is down or lagging.
 
-- [ ] After the redeploy: `sync:predict`, let `predict-devnet.json` change
+- [x] After the redeploy: `sync:predict`, let `predict-devnet.json` change
       rebuild the `predict_*` tables from the new start block (the path
-      tested in §2), push to the VPS. Waiting: on 2026-10-30 the
-      prediction-market repo still has the 2026-10-28 deployment and no
-      `settle` (its OPS §9.1 and §9.2 are open).
+      tested in §2), push to the VPS. Done 2026-10-31: the redeploy of
+      04:11 UTC (Predict `startBlock` 15247) synced, the VPS logged
+      "predict deployment changed" and rebuilt; season 1 (`endsAt`
+      1795627668) and markets 0 to 3 are indexed, no trades yet. Only
+      `MarketChanged` changed among the events, and no handler reads it.
 - [x] `settle` emits the existing `Claimed(id, user, xp)` once per user, so
       positions and `claimable` need no new handler. Check that a batch of
       `Claimed` in one transaction (several log indexes) is applied in full.
@@ -141,8 +143,11 @@ falling back to its log replay when the indexer is down or lagging.
       `predict-devnet.json` names. Before a second market contract goes live,
       index `PredictMarket` events by the set of allowed markets rather than
       one address. Not for now: Season 1 has one market contract.
-- [ ] Deploy the build with the Predict API (§3) to the VPS before the
-      interface switches over.
+- [x] Deploy the build with the Predict API (§3) to the VPS before the
+      interface switches over. Live 2026-10-31 with this section's API
+      (`predictPriceHistory`, `eligibleRank`, migration 005), at
+      `https://pauliswap.org/graphql`; port 4000 stays closed to the
+      Internet.
 - [x] `predictPriceHistory(market: Int!, from: Int, first: Int)`: the Yes
       price after each trade (block, timestamp, `priceYes`), plus the price
       24 h ago, for the market chart and its 24 h change. `PredictTrade` has
