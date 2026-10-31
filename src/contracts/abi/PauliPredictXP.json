@@ -36,6 +36,12 @@
         "internalType": "address",
         "name": "market",
         "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "allowed",
+        "type": "bool"
       }
     ],
     "name": "MarketChanged",
@@ -375,13 +381,19 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "market",
-    "outputs": [
+    "inputs": [
       {
         "internalType": "address",
-        "name": "",
+        "name": "market",
         "type": "address"
+      }
+    ],
+    "name": "isMarket",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -515,8 +527,13 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "market_",
+        "name": "market",
         "type": "address"
+      },
+      {
+        "internalType": "bool",
+        "name": "allowed",
+        "type": "bool"
       }
     ],
     "name": "setMarket",
